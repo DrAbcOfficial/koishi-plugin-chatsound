@@ -66,7 +66,6 @@ export function apply(ctx: Context, config: Config) {
 
     try {
       const audioBuffer = await applyPitch(audioPath, actualPitch)
-      ctx.logger.info(audioBuffer);
       await session.send(h.audio(audioBuffer, 'audio/mp3'))
     } catch (error) {
       ctx.logger.error('发送音频失败:', error)
