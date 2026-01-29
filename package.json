@@ -10,7 +10,6 @@
     "type": "git",
     "url": "git+https://github.com/DrAbcOfficial/koishi-plugin-chatsound.git"
   },
-  "keywords": ["chatsound", "noise"],
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
   "files": [
@@ -27,5 +26,12 @@
   "devDependencies": {},
   "peerDependencies": {
     "koishi": "^4.18.7"
+  },
+  "koishi": {
+    "description": {
+      "en": "发送预定的噪音，可以变调，依赖ffmpeg",
+      "zh": "发送预定的噪音，可以变调，依赖ffmpeg"
+    },
+    "preview": true
   }
 }
