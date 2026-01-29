@@ -1,8 +1,7 @@
 import { Context, Schema, h } from 'koishi'
 import { readdir } from 'fs/promises'
 import { extname, join } from 'path'
-import { exec, spawn } from 'child_process'
-import { promisify } from 'util'
+import { spawn } from 'child_process'
 import SilkService from 'koishi-plugin-silk'
 
 declare module 'koishi' {
@@ -11,11 +10,9 @@ declare module 'koishi' {
   }
 }
 
-const execAsync = promisify(exec)
-
 export const name = 'chatsound'
 export const inject = {
-  required: ['silk']
+  optional: ['silk']
 }
 
 export interface Config {
@@ -27,7 +24,7 @@ export interface Config {
 }
 
 export const Config: Schema<Config> = Schema.object({
-  soundPath: Schema.array(Schema.string()).description("用于搜索的音频路径"),
+  soundPath: Schema.array(Schema.string()).description("用于搜索音频的*绝对*路径，支持搜索mp3 wav ogg flac m4a aac格式"),
   defaultPitch: Schema.number().default(100).description("默认的语音音调（百分比）"),
   minPitch: Schema.number().default(80).min(0).description("最小Pitch，不小于0"),
   maxPitch: Schema.number().default(200).description("最大Pitch"),
@@ -60,13 +57,7 @@ async function runFFmpeg(commandArgs: string[]): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const ffmpeg = spawn('ffmpeg', commandArgs);
     const chunks: Buffer[] = [];
-
     ffmpeg.stdout.on('data', (chunk) => chunks.push(chunk));
-    ffmpeg.stderr.on('data', (chunk) => {
-      // 可选：记录 stderr 用于调试
-      // console.error(chunk.toString());
-    });
-
     ffmpeg.on('close', (code) => {
       if (code === 0) {
         resolve(Buffer.concat(chunks));
@@ -74,7 +65,6 @@ async function runFFmpeg(commandArgs: string[]): Promise<Buffer> {
         reject(new Error(`FFmpeg exited with code ${code}`));
       }
     });
-
     ffmpeg.on('error', reject);
   });
 }
@@ -115,23 +105,28 @@ export function apply(ctx: Context, config: Config) {
     if (!trigger) {
       return '至少给个名字吧大王'
     }
-
     const actualPitch =  Math.min(Math.max(pitch ?? config.defaultPitch, config.minPitch), config.maxPitch);
     const audioPath = await findAudioFile(trigger, config.soundPath)
     if (!audioPath) {
       return `没有这种音频`
     }
-
     try {
       const { data, mimeType } = await applyPitch(audioPath, actualPitch, config.audioType)
       if (config.audioType === 'silk') {
-        // Encode PCM to silk using the silk service
-        const silkResult = await ctx.silk.encode(data, 24000)
-        await session.send(h.audio(silkResult.data, 'audio/silk'))
-      } else {
+        if (ctx.silk){
+          // Encode PCM to silk using the silk service
+          const silkResult = await ctx.silk.encode(data, 24000)
+          await session.send(h.audio(silkResult.data, 'audio/silk'))
+        }
+        else{
+          return '没有安装必要的SILK插件'
+        }
+      } 
+      else {
         await session.send(h.audio(data, mimeType))
       }
-    } catch (error) {
+    } 
+    catch (error) {
       ctx.logger.error('发送音频失败:', error)
       return '发送音频失败'
     }
