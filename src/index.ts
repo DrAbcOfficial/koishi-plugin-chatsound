@@ -1,7 +1,7 @@
 import { Context, Schema, h } from 'koishi'
 import { readdir } from 'fs/promises'
 import { extname, join } from 'path'
-import { exec } from 'child_process'
+import { exec, spawn } from 'child_process'
 import { promisify } from 'util'
 import SilkService from 'koishi-plugin-silk'
 
@@ -56,22 +56,56 @@ async function findAudioFile(trigger: string, soundPaths: string[]): Promise<str
   return null
 }
 
+async function runFFmpeg(commandArgs: string[]): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const ffmpeg = spawn('ffmpeg', commandArgs);
+    const chunks: Buffer[] = [];
+
+    ffmpeg.stdout.on('data', (chunk) => chunks.push(chunk));
+    ffmpeg.stderr.on('data', (chunk) => {
+      // 可选：记录 stderr 用于调试
+      // console.error(chunk.toString());
+    });
+
+    ffmpeg.on('close', (code) => {
+      if (code === 0) {
+        resolve(Buffer.concat(chunks));
+      } else {
+        reject(new Error(`FFmpeg exited with code ${code}`));
+      }
+    });
+
+    ffmpeg.on('error', reject);
+  });
+}
+
 async function applyPitch(inputPath: string, pitch: number, audioType: "mp3" | "silk"): Promise<{ data: Buffer, mimeType: string }> {
-  // rubberband 使用半音（semitones）作为单位
-  // pitch = 100% → 0 semitones
-  // pitch = 200% → +12 semitones（高八度）
-  // pitch = 50%  → -12 semitones（低八度）
-  const semitones = 12 * Math.log2(pitch / 100)
+  const pitchFactor = pitch / 100;
 
   if (audioType === "mp3") {
-    const command = `ffmpeg -i "${inputPath}" -filter:a "rubberband=pitch=${pitch / 100}" -f mp3 -`
-    const { stdout } = await execAsync(command)
-    return { data: Buffer.from(stdout), mimeType: 'audio/mp3' }
+    const args = [
+      '-i', inputPath,
+      '-vn', '-sn', '-dn',
+      '-filter:a', `rubberband=pitch=${pitchFactor}`,
+      '-f', 'mp3',
+      '-y',
+      'pipe:1'
+    ];
+    const data = await runFFmpeg(args);
+    return { data, mimeType: 'audio/mp3' };
   } else {
-    // 输出 PCM for silk: 24kHz, mono, s16le
-    const command = `ffmpeg -i "${inputPath}" -filter:a "rubberband=pitch=${pitch / 100}" -f s16le -ac 1 -ar 24000 -`
-    const { stdout } = await execAsync(command)
-    return { data: Buffer.from(stdout), mimeType: 'audio/pcm' }
+    const args = [
+      '-i', inputPath,
+      '-vn', '-sn', '-dn',
+      '-filter:a', `rubberband=pitch=${pitchFactor}`,
+      '-f', 's16le',
+      '-ac', '1',
+      '-ar', '24000',
+      '-y',
+      'pipe:1'
+    ];
+    const data = await runFFmpeg(args);
+    return { data, mimeType: 'audio/pcm' };
   }
 }
 
