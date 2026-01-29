@@ -57,15 +57,19 @@ async function findAudioFile(trigger: string, soundPaths: string[]): Promise<str
 }
 
 async function applyPitch(inputPath: string, pitch: number, audioType: "mp3" | "silk"): Promise<{ data: Buffer, mimeType: string }> {
-  const pitchFactor = pitch / 100
-  
+  // rubberband 使用半音（semitones）作为单位
+  // pitch = 100% → 0 semitones
+  // pitch = 200% → +12 semitones（高八度）
+  // pitch = 50%  → -12 semitones（低八度）
+  const semitones = 12 * Math.log2(pitch / 100)
+
   if (audioType === "mp3") {
-    const command = `ffmpeg -i "${inputPath}" -filter:a "asetrate=44100*${pitchFactor},aresample=44100" -f mp3 -`
+    const command = `ffmpeg -i "${inputPath}" -filter:a "rubberband=pitch=${pitch / 100}" -f mp3 -`
     const { stdout } = await execAsync(command)
     return { data: Buffer.from(stdout), mimeType: 'audio/mp3' }
   } else {
-    // For silk, we need to generate PCM first
-    const command = `ffmpeg -i "${inputPath}" -filter:a "asetrate=44100*${pitchFactor},aresample=24000" -f s16le -ac 1 -ar 24000 -`
+    // 输出 PCM for silk: 24kHz, mono, s16le
+    const command = `ffmpeg -i "${inputPath}" -filter:a "rubberband=pitch=${pitch / 100}" -f s16le -ac 1 -ar 24000 -`
     const { stdout } = await execAsync(command)
     return { data: Buffer.from(stdout), mimeType: 'audio/pcm' }
   }
