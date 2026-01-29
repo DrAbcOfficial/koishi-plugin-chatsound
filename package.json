@@ -4,7 +4,7 @@
   "contributors": [
     "Dr.Abc <me@drabc.net>"
   ],
-  "version": "0.0.2",
+  "version": "0.0.3",
   "homepage": "https://github.com/DrAbcOfficial/koishi-plugin-chatsound",
   "repository": {
     "type": "git",
@@ -31,6 +31,9 @@
     "description": {
       "en": "发送预定的噪音，可以变调，依赖ffmpeg",
       "zh": "发送预定的噪音，可以变调，依赖ffmpeg"
+    },
+    "service":{
+      "required": ["silk"]
     },
     "preview": true
   }
