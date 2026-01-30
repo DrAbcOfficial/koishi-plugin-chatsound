@@ -20,6 +20,7 @@ export interface Config {
   defaultPitch: number,
   minPitch: number,
   maxPitch: number,
+  keepSoundLength: boolean,
   audioType: "mp3" | "silk"
 }
 
@@ -28,10 +29,59 @@ export const Config: Schema<Config> = Schema.object({
   defaultPitch: Schema.number().default(100).description("默认的语音音调（百分比）"),
   minPitch: Schema.number().default(80).min(0).description("最小Pitch，不小于0"),
   maxPitch: Schema.number().default(200).description("最大Pitch"),
+  keepSoundLength: Schema.boolean().default(false).description("保持音频播放长度，仅进行  变调"),
   audioType: Schema.union(["mp3", "silk"]).default("mp3").description("最终发送的类型，QQ及微信选择SILK")
 });
 
-const AUDIO_EXTENSIONS = ['.mp3', '.wav', '.ogg', '.flac', '.m4a', '.aac']
+const AUDIO_EXTENSIONS = ['.mp3', '.wav', '.ogg', '.flac', '.m4a', '.aac'];
+
+let ffmpegAvailable: boolean | null = null;
+let ffmpegCheckPromise: Promise<boolean> | null = null;
+async function checkFFmpeg(): Promise<boolean> {
+  if (ffmpegAvailable !== null)
+    return ffmpegAvailable;
+  if (ffmpegCheckPromise)
+    return ffmpegCheckPromise;
+
+  ffmpegCheckPromise = new Promise((resolve) => {
+    const { spawn } = require('child_process');
+    let resolved = false;
+
+    const timeout = setTimeout(() => {
+      if (!resolved) {
+        resolved = true;
+        resolve(false);
+      }
+    }, 3000);
+
+    try {
+      const ffmpeg = spawn('ffmpeg', ['-version']);
+      ffmpeg.on('error', () => {
+        if (!resolved) {
+          resolved = true;
+          clearTimeout(timeout);
+          resolve(false);
+        }
+      });
+      ffmpeg.on('close', (code) => {
+        if (!resolved) {
+          resolved = true;
+          clearTimeout(timeout);
+          resolve(code === 0);
+        }
+      });
+    }
+    catch {
+      clearTimeout(timeout);
+      resolve(false);
+    }
+  }).then(result => {
+    ffmpegAvailable = result as boolean;
+    return result;
+  }) as Promise<boolean>;
+
+  return ffmpegCheckPromise;
+}
 
 async function findAudioFile(trigger: string, soundPaths: string[]): Promise<string | null> {
   for (const basePath of soundPaths) {
@@ -69,66 +119,70 @@ async function runFFmpeg(commandArgs: string[]): Promise<Buffer> {
   });
 }
 
-async function applyPitch(inputPath: string, pitch: number, audioType: "mp3" | "silk"): Promise<{ data: Buffer, mimeType: string }> {
+async function applyPitch(inputPath: string, pitch: number, audioType: "mp3" | "silk", keepSoundLength: boolean): Promise<{ data: Buffer, mimeType: string }> {
   const pitchFactor = pitch / 100;
 
+  let args = [
+    '-i', inputPath,
+    '-vn', '-sn', '-dn',
+    '-y'
+  ];
+
+  if (keepSoundLength) {
+    args.push('-af', `rubberband=pitch=${pitchFactor}`);
+  } else {
+    args.push('-af', `asetrate=sample_rate*${pitchFactor}`);
+  }
+
   if (audioType === "mp3") {
-    const args = [
-      '-i', inputPath,
-      '-vn', '-sn', '-dn',
-      '-filter:a', `rubberband=pitch=${pitchFactor}`,
-      '-f', 'mp3',
-      '-y',
-      'pipe:1'
-    ];
+    args.push('-f', 'mp3', 'pipe:1');
     const data = await runFFmpeg(args);
     return { data, mimeType: 'audio/mp3' };
   } else {
-    const args = [
-      '-i', inputPath,
-      '-vn', '-sn', '-dn',
-      '-filter:a', `rubberband=pitch=${pitchFactor}`,
-      '-f', 's16le',
-      '-ac', '1',
-      '-ar', '24000',
-      '-y',
-      'pipe:1'
-    ];
+    args.push('-f', 's16le', '-ac', '1', '-ar', '24000', 'pipe:1');
     const data = await runFFmpeg(args);
     return { data, mimeType: 'audio/pcm' };
   }
 }
 
 export function apply(ctx: Context, config: Config) {
-  ctx.command('v <trigger:string> [pitch:number]')
-  .action(async ({ session }, trigger, pitch) => {
-    if (!trigger) {
-      return '至少给个名字吧大王'
+  checkFFmpeg().then(available => {
+    if (!available) {
+      ctx.logger.warn('FFmpeg not found! Audio processing will fail.');
+    } else {
+      ctx.logger.debug('FFmpeg is available.');
     }
-    const actualPitch =  Math.min(Math.max(pitch ?? config.defaultPitch, config.minPitch), config.maxPitch);
-    const audioPath = await findAudioFile(trigger, config.soundPath)
-    if (!audioPath) {
-      return `没有这种音频`
-    }
-    try {
-      const { data, mimeType } = await applyPitch(audioPath, actualPitch, config.audioType)
-      if (config.audioType === 'silk') {
-        if (ctx.silk){
-          // Encode PCM to silk using the silk service
-          const silkResult = await ctx.silk.encode(data, 24000)
-          await session.send(h.audio(silkResult.data, 'audio/silk'))
-        }
-        else{
-          return '没有安装必要的SILK插件'
-        }
-      } 
-      else {
-        await session.send(h.audio(data, mimeType))
+  });
+
+  ctx.command('v <trigger:string> [pitch:number] 发送一个噪音')
+    .action(async ({ session }, trigger, pitch) => {
+      if (!trigger) {
+        return '至少给个名字吧大王'
       }
-    } 
-    catch (error) {
-      ctx.logger.error('发送音频失败:', error)
-      return '发送音频失败'
-    }
-  })
+      const actualPitch = Math.min(Math.max(pitch ?? config.defaultPitch, config.minPitch), config.maxPitch);
+      const audioPath = await findAudioFile(trigger, config.soundPath)
+      if (!audioPath) {
+        return `没有这种音频`
+      }
+      try {
+        const { data, mimeType } = await applyPitch(audioPath, actualPitch, config.audioType, config.keepSoundLength)
+        if (config.audioType === 'silk') {
+          if (ctx.silk) {
+            // Encode PCM to silk using the silk service
+            const silkResult = await ctx.silk.encode(data, 24000)
+            await session.send(h.audio(silkResult.data, 'audio/silk'))
+          }
+          else {
+            return '没有安装必要的SILK插件'
+          }
+        }
+        else {
+          await session.send(h.audio(data, mimeType))
+        }
+      }
+      catch (error) {
+        ctx.logger.error('发送音频失败:', error)
+        return '发送音频失败'
+      }
+    })
 }
