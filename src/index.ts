@@ -103,15 +103,53 @@ async function findAudioFile(trigger: string, soundPaths: string[]): Promise<str
   return null
 }
 
-async function runFFmpeg(commandArgs: string[]): Promise<Buffer> {
+
+async function getSampleRate(audioPath: string): Promise<number> {
+  const { spawn } = require('child_process');
+  return new Promise((resolve, reject) => {
+    const ffprobe = spawn('ffprobe', [
+      '-v', 'error',
+      '-select_streams', 'a:0',
+      '-show_entries', 'stream=sample_rate',
+      '-of', 'default=nw=1:nk=1',
+      audioPath
+    ]);
+    let output = '';
+    const stderrChunks: Buffer[] = [];
+    ffprobe.stdout.on('data', (data) => output += data.toString());
+    ffprobe.stderr.on('data', (data) => {
+      stderrChunks.push(data);
+    });
+    ffprobe.on('close', (code) => {
+      if (code === 0) {
+        const rate = parseInt(output.trim(), 10);
+        if (isNaN(rate)) {
+          reject(new Error('Failed to parse sample rate'));
+        } else {
+          resolve(rate);
+        }
+      } else {
+        const stderrOutput = Buffer.concat(stderrChunks).toString('utf8').trim();
+        reject(new Error(`ffprobe error: ${stderrOutput}, code ${code}`));
+      }
+    });
+    ffprobe.on('error', reject);
+  });
+}
+
+async function runFFmpeg(commandArgs: string[], ctx:Context): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const ffmpeg = spawn('ffmpeg', commandArgs);
     const chunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
     ffmpeg.stdout.on('data', (chunk) => chunks.push(chunk));
+    ffmpeg.stderr.on('data', (chunk) => stderrChunks.push(chunk));
     ffmpeg.on('close', (code) => {
       if (code === 0) {
         resolve(Buffer.concat(chunks));
       } else {
+        const stderrOutput = Buffer.concat(stderrChunks).toString('utf8').trim();
+        ctx.logger.error('FFmpeg stderr output:', stderrOutput);
         reject(new Error(`FFmpeg exited with code ${code}`));
       }
     });
@@ -119,7 +157,7 @@ async function runFFmpeg(commandArgs: string[]): Promise<Buffer> {
   });
 }
 
-async function applyPitch(inputPath: string, pitch: number, audioType: "mp3" | "silk", keepSoundLength: boolean): Promise<{ data: Buffer, mimeType: string }> {
+async function applyPitch(ctx: Context, inputPath: string, pitch: number, audioType: "mp3" | "silk", keepSoundLength: boolean): Promise<{ data: Buffer, mimeType: string }> {
   const pitchFactor = pitch / 100;
 
   let args = [
@@ -131,16 +169,20 @@ async function applyPitch(inputPath: string, pitch: number, audioType: "mp3" | "
   if (keepSoundLength) {
     args.push('-af', `rubberband=pitch=${pitchFactor}`);
   } else {
-    args.push('-af', `asetrate=sample_rate*${pitchFactor}`);
+    const originalRate = await getSampleRate(inputPath);
+    const targetRate = Math.round(originalRate * pitchFactor);
+    args.push('-af', `asetrate=${targetRate}`);
   }
 
   if (audioType === "mp3") {
     args.push('-f', 'mp3', 'pipe:1');
-    const data = await runFFmpeg(args);
+    const data = await runFFmpeg(args, ctx);
     return { data, mimeType: 'audio/mp3' };
   } else {
-    args.push('-f', 's16le', '-ac', '1', '-ar', '24000', 'pipe:1');
-    const data = await runFFmpeg(args);
+    args.push();
+    args.push('-ar', '24000', '-ac', '1', 
+              '-f', 's16le', 'pipe:1');
+    const data = await runFFmpeg(args, ctx);
     return { data, mimeType: 'audio/pcm' };
   }
 }
@@ -165,7 +207,7 @@ export function apply(ctx: Context, config: Config) {
         return `没有这种音频`
       }
       try {
-        const { data, mimeType } = await applyPitch(audioPath, actualPitch, config.audioType, config.keepSoundLength)
+        const { data, mimeType } = await applyPitch(ctx,audioPath, actualPitch, config.audioType, config.keepSoundLength)
         if (config.audioType === 'silk') {
           if (ctx.silk) {
             // Encode PCM to silk using the silk service
